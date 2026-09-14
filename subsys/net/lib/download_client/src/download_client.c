@@ -32,8 +32,30 @@ LOG_MODULE_REGISTER(download_client, CONFIG_DOWNLOAD_CLIENT_LOG_LEVEL);
 #define HOSTNAME_SIZE CONFIG_DOWNLOAD_CLIENT_MAX_HOSTNAME_SIZE
 #define PROGRESS_REPORT_INTERVAL CONFIG_DOWNLOAD_CLIENT_REPORT_INTERVAL
 
+#if defined(CONFIG_SYS_HEAP_RUNTIME_STATS) && (CONFIG_HEAP_MEM_POOL_SIZE > 0)
+extern struct k_heap _system_heap;
+#endif
+
 static int handle_disconnect(struct download_client *client);
 static int error_evt_send(const struct download_client *dl, int error);
+
+static void log_alloc_failure(size_t requested_bytes)
+{
+#if defined(CONFIG_SYS_HEAP_RUNTIME_STATS) && (CONFIG_HEAP_MEM_POOL_SIZE > 0)
+	struct sys_memory_stats stats;
+
+	if (sys_heap_runtime_stats_get(&_system_heap.heap, &stats) == 0) {
+		LOG_ERR("Failed to allocate %zu B download buffer (heap free=%zu B, "
+			"allocated=%zu B, max=%zu B)",
+			requested_bytes, stats.free_bytes, stats.allocated_bytes,
+			stats.max_allocated_bytes);
+		return;
+	}
+#endif
+
+	LOG_ERR("Failed to allocate %zu B download buffer (heap stats unavailable)",
+		requested_bytes);
+}
 
 static bool is_idle(struct download_client *client)
 {
@@ -826,8 +848,12 @@ void download_thread(void *client, void *a, void *b)
 
 		dl->buf = k_malloc(CONFIG_DOWNLOAD_CLIENT_BUF_SIZE);
 		if (dl->buf == NULL) {
-			LOG_ERR("alloc error");
-			return;
+			log_alloc_failure(CONFIG_DOWNLOAD_CLIENT_BUF_SIZE);
+
+			/* Keep the download thread alive and return the client to IDLE. */
+			(void)error_evt_send(dl, ENOMEM);
+			(void)handle_disconnect(dl);
+			continue;
 		}
 
 		/* Connect to the target host */
