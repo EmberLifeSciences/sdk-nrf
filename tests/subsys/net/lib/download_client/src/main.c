@@ -15,6 +15,7 @@
 
 K_PIPE_DEFINE(event_pipe, 10, _Alignof(struct download_client_evt));
 static struct download_client client;
+static bool fail_next_download_alloc;
 static const struct sockaddr_in addr_coap_me_http = {
 	.sin_family = AF_INET,
 	.sin_port = htons(80),
@@ -38,6 +39,16 @@ static int download_client_callback(const struct download_client_evt *event)
 	k_pipe_put(&event_pipe, (void *)event, sizeof(*event), &written, sizeof(*event), K_FOREVER);
 
 	return 0;
+}
+
+void *download_client_test_malloc(size_t size)
+{
+	if (fail_next_download_alloc) {
+		fail_next_download_alloc = false;
+		return NULL;
+	}
+
+	return k_malloc(size);
 }
 
 static void mock_return_values(const char *func, int32_t *val, size_t len)
@@ -114,6 +125,31 @@ static void de_init(struct download_client *client)
 }
 
 ZTEST_SUITE(download_client, NULL, NULL, NULL, NULL, NULL);
+
+ZTEST(download_client, test_alloc_failure_recovers)
+{
+	struct download_client_evt evt;
+
+	init();
+	fail_next_download_alloc = true;
+	dl_coap_start();
+
+	evt = get_next_event(K_SECONDS(1));
+	zassert_equal(evt.id, DOWNLOAD_CLIENT_EVT_ERROR);
+	zassert_equal(evt.error, -ENOMEM);
+	de_init(&client);
+
+	/* A second request proves the allocation failure did not permanently
+	 * terminate the shared download thread or leave the client busy.
+	 */
+	fail_next_download_alloc = true;
+	dl_coap_start();
+
+	evt = get_next_event(K_SECONDS(1));
+	zassert_equal(evt.id, DOWNLOAD_CLIENT_EVT_ERROR);
+	zassert_equal(evt.error, -ENOMEM);
+	de_init(&client);
+}
 
 ZTEST(download_client, test_download_simple)
 {
